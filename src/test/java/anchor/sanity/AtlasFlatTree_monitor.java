@@ -12,14 +12,12 @@ import javax.mail.*;
 import javax.mail.internet.*;
 import java.io.*;
 import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 public class AtlasFlatTree_monitor {
 
     private static final String BACKUP_BASE = "/home/projects/developers/store/repos1/iitlab/humanbrain/analytics/backup_atlas";
     private static final String NISL_SUBPATH = "294/appData/atlasEditor/189/NISL";
-    private static final DateTimeFormatter FMT = DateTimeFormatter.ofPattern("dd_MM_yyyy");
 
     private static final String SSH_HOST = "qd1.humanbrain.in";
     private static final int SSH_PORT = 22;
@@ -36,8 +34,9 @@ public class AtlasFlatTree_monitor {
     private boolean todayBackupFound = false;
     private boolean diskAlert = false;
     private int diskUsedPct = 0;
-    private String latestBackupName = "";
-    private String prevBackupName = "";
+    private String todayDirName = "";       // e.g. "2026/08/21"
+    private String latestBackupName = "";   // e.g. "2026/08/20"
+    private String prevBackupName = "";     // e.g. "2026/08/19"
     private int latestTotal = 0, latestEmpty = 0, latestGood = 0;
     private int prevTotal = 0, prevEmpty = 0, prevGood = 0;
     private List<String> corruptedSections = new ArrayList<>();
@@ -160,18 +159,38 @@ public class AtlasFlatTree_monitor {
 
     // ==================== HELPERS ====================
 
+    /**
+     * Backups now live in a YYYY/MM/DD tree under BACKUP_BASE
+     * (e.g. backup_atlas/2026/08/20) instead of the old flat
+     * backup_atlas/backup_DD_MM_YYYY folders. This walks that tree,
+     * newest first, and returns the relative "YYYY/MM/DD" path.
+     */
     private String getBackupDir(int index) throws Exception {
-        String cmd = "for d in " + BACKUP_BASE + "/backup_[0-9]*; do "
-                + "name=$(basename $d); "
-                + "dt=$(echo $name | sed 's/backup_//' | awk -F_ '{print $3$2$1}'); "
-                + "echo \"$dt|$name\"; "
-                + "done 2>/dev/null | sort -t'|' -k1 | cut -d'|' -f2";
+        String cmd = "find " + BACKUP_BASE + " -mindepth 3 -maxdepth 3 -type d "
+                + "-regextype posix-extended -regex '.*/[0-9]{4}/[0-9]{2}/[0-9]{2}' 2>/dev/null | sort";
         String result = runCmd(cmd);
         if (result.isEmpty()) return null;
 
         String[] dirs = result.split("\n");
         if (dirs.length <= index) return null;
-        return dirs[dirs.length - 1 - index].trim();
+        return toRelative(dirs[dirs.length - 1 - index].trim());
+    }
+
+    private String toRelative(String fullPath) {
+        if (fullPath.startsWith(BACKUP_BASE)) {
+            String rel = fullPath.substring(BACKUP_BASE.length());
+            while (rel.startsWith("/")) rel = rel.substring(1);
+            return rel;
+        }
+        return fullPath;
+    }
+
+    /** "2026/08/20" -> "20-08-2026" for readability in logs/emails */
+    private String displayDate(String ymd) {
+        if (ymd == null || ymd.isEmpty()) return "";
+        String[] parts = ymd.split("/");
+        if (parts.length != 3) return ymd;
+        return parts[2] + "-" + parts[1] + "-" + parts[0];
     }
 
     private Map<String, Long> parseFlatTree(String output) {
@@ -237,41 +256,38 @@ public class AtlasFlatTree_monitor {
     public void testBackupExistsToday() throws Exception {
         System.out.println("\n--- Test 2: Daily Backup Check ---\n");
 
-        String todayDir = "backup_" + today.format(FMT);
-        String todayPath = BACKUP_BASE + "/" + todayDir;
+        todayDirName = String.format("%04d/%02d/%02d", today.getYear(), today.getMonthValue(), today.getDayOfMonth());
+        String todayPath = BACKUP_BASE + "/" + todayDirName;
         String exists = runCmd("test -d " + todayPath + " && echo YES || echo NO");
 
         if ("YES".equals(exists)) {
             todayBackupFound = true;
-            latestBackupName = todayDir;
-            System.out.println("  Today's backup : " + todayDir + " -> EXISTS");
+            latestBackupName = todayDirName;
+            System.out.println("  Today's backup : " + displayDate(todayDirName) + " -> EXISTS");
 
             String nislExists = runCmd("test -d " + todayPath + "/" + NISL_SUBPATH + " && echo YES || echo NO");
             System.out.println("  NISL folder    : " + nislExists);
             System.out.println("  Result         : OK");
         } else {
-            System.out.println("  Today's backup : " + todayDir + " -> NOT FOUND!");
+            System.out.println("  Today's backup : " + displayDate(todayDirName) + " -> NOT FOUND!");
             System.out.println("\n  Recent backups:");
 
-            String recent = runCmd("for d in " + BACKUP_BASE + "/backup_[0-9]*; do "
-                    + "name=$(basename $d); "
-                    + "dt=$(echo $name | sed 's/backup_//' | awk -F_ '{print $3$2$1}'); "
-                    + "echo \"$dt|$name\"; "
-                    + "done 2>/dev/null | sort -t'|' -k1 | tail -5 | cut -d'|' -f2");
+            String recent = runCmd("find " + BACKUP_BASE + " -mindepth 3 -maxdepth 3 -type d "
+                    + "-regextype posix-extended -regex '.*/[0-9]{4}/[0-9]{2}/[0-9]{2}' 2>/dev/null | sort | tail -5");
             if (!recent.isEmpty()) {
                 for (String name : recent.split("\n")) {
-                    System.out.println("    " + name.trim());
+                    System.out.println("    " + displayDate(toRelative(name.trim())));
                 }
             }
 
             // Use latest available for Test 3
             latestBackupName = getBackupDir(0);
             if (latestBackupName != null) {
-                System.out.println("\n  Latest available: " + latestBackupName);
+                System.out.println("\n  Latest available: " + displayDate(latestBackupName));
             }
 
-            failedTests.add("Backup not found for " + todayDir);
-            Assert.fail("Backup not taken for today (" + todayDir + ")! Latest: " + latestBackupName);
+            failedTests.add("Backup not found for " + displayDate(todayDirName));
+            Assert.fail("Backup not taken for today (" + displayDate(todayDirName) + ")! Latest: " + displayDate(latestBackupName));
         }
     }
 
@@ -293,8 +309,8 @@ public class AtlasFlatTree_monitor {
             return;
         }
 
-        System.out.println("  Current  : " + latestBackupName);
-        System.out.println("  Previous : " + prevBackupName);
+        System.out.println("  Current  : " + displayDate(latestBackupName));
+        System.out.println("  Previous : " + displayDate(prevBackupName));
         System.out.println();
 
         String latestPath = BACKUP_BASE + "/" + latestBackupName + "/" + NISL_SUBPATH;
@@ -362,7 +378,7 @@ public class AtlasFlatTree_monitor {
 
     private void sendAlertEmail() {
         String[] to = {"venip@htic.iitm.ac.in"};
-        String[] cc = {"divya.d@htic.iitm.ac.in"};
+        String[] cc = {"divya.d@htic.iitm.ac.in, chrislinesam@htic.iitm.ac.in"};
         String from = "automationsoftware25@gmail.com";
 
         Properties props = System.getProperties();
@@ -410,7 +426,7 @@ public class AtlasFlatTree_monitor {
 
             addRow(body, "Machine Up", machineUp, machineUp ? "Reachable" : "DOWN!");
             addRow(body, "Disk Usage", !diskAlert, diskUsedPct + "%" + (diskAlert ? " (CRITICAL!)" : ""));
-            addRow(body, "Today Backup", todayBackupFound, todayBackupFound ? "backup_" + today.format(FMT) : "NOT FOUND");
+            addRow(body, "Today Backup", todayBackupFound, todayBackupFound ? displayDate(todayDirName) : "NOT FOUND");
             boolean intOk = corruptedSections.isEmpty() && missingInLatest.isEmpty();
             addRow(body, "Data Integrity", intOk, intOk ? "All OK"
                     : corruptedSections.size() + " corrupted, " + missingInLatest.size() + " missing");
@@ -421,9 +437,9 @@ public class AtlasFlatTree_monitor {
                 body.append("<h3>FlatTree Comparison</h3>");
                 body.append("<table border='1' cellpadding='8' cellspacing='0' style='border-collapse:collapse; width:100%;'>");
                 body.append("<tr style='background:#f5f5f5;'><th>Backup</th><th>Total</th><th>Empty(2B)</th><th>With Data</th></tr>");
-                body.append("<tr><td>").append(latestBackupName).append("</td><td>").append(latestTotal)
+                body.append("<tr><td>").append(displayDate(latestBackupName)).append("</td><td>").append(latestTotal)
                         .append("</td><td>").append(latestEmpty).append("</td><td>").append(latestGood).append("</td></tr>");
-                body.append("<tr><td>").append(prevBackupName).append("</td><td>").append(prevTotal)
+                body.append("<tr><td>").append(displayDate(prevBackupName)).append("</td><td>").append(prevTotal)
                         .append("</td><td>").append(prevEmpty).append("</td><td>").append(prevGood).append("</td></tr>");
                 body.append("</table>");
             }
@@ -432,7 +448,7 @@ public class AtlasFlatTree_monitor {
             if (!corruptedSections.isEmpty()) {
                 body.append("<h3 style='color:red;'>Corrupted Sections (data -> 2B empty)</h3>");
                 body.append("<p>Sections: <b>").append(String.join(", ", corruptedSections)).append("</b></p>");
-                body.append("<p><i>Restore from ").append(prevBackupName).append("</i></p>");
+                body.append("<p><i>Restore from ").append(displayDate(prevBackupName)).append("</i></p>");
             }
 
             if (!missingInLatest.isEmpty()) {
