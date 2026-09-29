@@ -377,7 +377,7 @@ public class AtlasFlatTree_monitor {
     // ==================== EMAIL ====================
 
     private void sendAlertEmail() {
-        String[] to = {"venip@htic.iitm.ac.in"};
+        String[] to = {"venip@htic.iitm.ac.in, nathan.i@htic.iitm.ac.in"};
         String[] cc = {"divya.d@htic.iitm.ac.in, chrislinesam@htic.iitm.ac.in"};
         String from = "automationsoftware25@gmail.com";
 
